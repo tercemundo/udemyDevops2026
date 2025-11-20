@@ -1,0 +1,645 @@
+#!/bin/bash
+
+# linux-tour.sh - Sistema de tours interactivos de Linux
+# Uso: ./linux-tour.sh --install | --uninstall
+
+set -e
+
+INSTALL_DIR="$HOME/.linux-tour"
+PLUGINS_DIR="$INSTALL_DIR/plugins"
+CURRENT_PLUGIN=""
+DELAY=3
+
+# Colores y emojis
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Emojis (usando Unicode)
+EMOJI_ROCKET="🚀"
+EMOJI_BOOK="📚"
+EMOJI_CHECK="✅"
+EMOJI_CROSS="❌"
+EMOJI_INFO="ℹ️"
+EMOJI_WARN="⚠️"
+EMOJI_STAR="⭐"
+EMOJI_COMPUTER="💻"
+EMOJI_FOLDER="📁"
+EMOJI_FILE="📄"
+EMOJI_TRASH="🗑️"
+EMOJI_MAGNIFY="🔍"
+EMOJI_PARTY="🎉"
+EMOJI_GEAR="⚙️"
+EMOJI_LIGHT="💡"
+
+print_banner() {
+    clear
+    echo -e "${BOLD}${CYAN}"
+    cat << "EOF"
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║                    LINUX TOUR INTERACTIVE                     ║
+║                  Aprende Linux de forma guiada                ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+EOF
+    echo -e "${NC}"
+}
+
+print_header() {
+    echo ""
+    echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${BLUE}║ $1${NC}"
+    echo -e "${BOLD}${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+print_step() {
+    echo -e "\n${BOLD}${CYAN}${EMOJI_ROCKET} $1${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}${EMOJI_CHECK} $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}${EMOJI_CROSS} $1${NC}"
+}
+
+print_info() {
+    echo -e "${MAGENTA}${EMOJI_INFO} $1${NC}"
+}
+
+print_command() {
+    echo -e "\n${YELLOW}${EMOJI_COMPUTER} Comando:${NC} ${BOLD}$1${NC}"
+}
+
+print_output() {
+    echo -e "${CYAN}${EMOJI_MAGNIFY} Salida:${NC}"
+}
+
+print_explanation() {
+    echo -e "${MAGENTA}${EMOJI_LIGHT} Explicación:${NC} $1"
+}
+
+delay() {
+    local seconds=${1:-$DELAY}
+    sleep "$seconds"
+}
+
+run_command_demo() {
+    local cmd="$1"
+    local explanation="$2"
+    
+    print_command "$cmd"
+    
+    if [ -n "$explanation" ]; then
+        print_explanation "$explanation"
+    fi
+    
+    delay 2
+    
+    print_output
+    echo -e "${GREEN}─────────────────────────────────────────────────${NC}"
+    eval "$cmd" 2>&1 | sed 's/^/  /'
+    echo -e "${GREEN}─────────────────────────────────────────────────${NC}"
+    
+    delay "$DELAY"
+}
+
+install_tour() {
+    print_banner
+    print_header "INSTALACIÓN DE LINUX TOUR"
+    
+    print_step "Creando directorios..."
+    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$PLUGINS_DIR"
+    print_success "Directorios creados en $INSTALL_DIR"
+    
+    print_step "Copiando script principal..."
+    cp "$0" "$INSTALL_DIR/linux-tour.sh"
+    chmod +x "$INSTALL_DIR/linux-tour.sh"
+    print_success "Script copiado"
+    
+    print_step "Creando enlace simbólico en /usr/local/bin..."
+    if [ -w "/usr/local/bin" ]; then
+        ln -sf "$INSTALL_DIR/linux-tour.sh" /usr/local/bin/linux-tour
+        print_success "Enlace creado: linux-tour disponible globalmente"
+    else
+        sudo ln -sf "$INSTALL_DIR/linux-tour.sh" /usr/local/bin/linux-tour
+        print_success "Enlace creado con sudo: linux-tour disponible globalmente"
+    fi
+    
+    print_step "Generando plugins por defecto..."
+    generate_default_plugins
+    print_success "Plugins generados"
+    
+    echo ""
+    print_success "${EMOJI_PARTY} Instalación completada exitosamente!"
+    echo ""
+    print_info "Comandos disponibles:"
+    echo "  ${BOLD}linux-tour run${NC}          - Ejecutar el tour completo"
+    echo "  ${BOLD}linux-tour run <plugin>${NC} - Ejecutar un plugin específico"
+    echo "  ${BOLD}linux-tour list${NC}         - Listar plugins disponibles"
+    echo "  ${BOLD}linux-tour --uninstall${NC}  - Desinstalar Linux Tour"
+    echo ""
+}
+
+uninstall_tour() {
+    print_banner
+    print_header "DESINSTALACIÓN DE LINUX TOUR"
+    
+    if [ ! -d "$INSTALL_DIR" ]; then
+        print_error "Linux Tour no está instalado"
+        exit 1
+    fi
+    
+    echo -e "${YELLOW}¿Estás seguro que deseas desinstalar Linux Tour? (s/N):${NC}"
+    read -p "> " confirm
+    
+    if [ "$confirm" != "s" ] && [ "$confirm" != "S" ]; then
+        print_info "Desinstalación cancelada"
+        exit 0
+    fi
+    
+    print_step "Eliminando enlace simbólico..."
+    if [ -L "/usr/local/bin/linux-tour" ]; then
+        if [ -w "/usr/local/bin" ]; then
+            rm -f /usr/local/bin/linux-tour
+        else
+            sudo rm -f /usr/local/bin/linux-tour
+        fi
+        print_success "Enlace eliminado"
+    fi
+    
+    print_step "Eliminando archivos..."
+    rm -rf "$INSTALL_DIR"
+    print_success "Archivos eliminados"
+    
+    echo ""
+    print_success "${EMOJI_PARTY} Linux Tour desinstalado exitosamente"
+    echo ""
+}
+
+generate_default_plugins() {
+    # Plugin 01: Comandos básicos
+    cat > "$PLUGINS_DIR/01-basic-commands.sh" <<'PLUGIN_EOF'
+#!/bin/bash
+# Plugin: Comandos Básicos de Linux
+# Descripción: Introduce los comandos más fundamentales
+
+plugin_info() {
+    echo "01-basic-commands"
+    echo "Comandos Básicos de Linux"
+    echo "Aprende pwd, ls, mkdir, rm y más"
+}
+
+plugin_run() {
+    print_header "${EMOJI_BOOK} LECCIÓN 1: COMANDOS BÁSICOS DE LINUX"
+    
+    print_step "Bienvenido al tour de comandos básicos de Linux!"
+    print_info "En esta lección aprenderás los comandos esenciales para navegar el sistema"
+    delay 3
+    
+    # PWD
+    print_step "1. Comando 'pwd' - Print Working Directory"
+    run_command_demo "pwd" \
+        "Muestra el directorio actual donde estás ubicado"
+    
+    # LS
+    print_step "2. Comando 'ls' - List"
+    run_command_demo "ls" \
+        "Lista los archivos y directorios en el directorio actual"
+    
+    run_command_demo "ls -l" \
+        "Lista con formato largo (permisos, tamaño, fecha)"
+    
+    run_command_demo "ls -lah" \
+        "Lista todo (incluyendo ocultos) en formato legible"
+    
+    # MKDIR
+    print_step "3. Comando 'mkdir' - Make Directory"
+    run_command_demo "mkdir /tmp/linux-tour-demo" \
+        "Crea un nuevo directorio llamado 'linux-tour-demo'"
+    
+    run_command_demo "mkdir -p /tmp/linux-tour-demo/sub1/sub2/sub3" \
+        "Crea directorios anidados con la opción -p"
+    
+    # CD
+    print_step "4. Comando 'cd' - Change Directory"
+    print_command "cd /tmp/linux-tour-demo"
+    print_explanation "Cambia al directorio especificado"
+    cd /tmp/linux-tour-demo
+    delay 2
+    run_command_demo "pwd" \
+        "Verificamos que estamos en el nuevo directorio"
+    
+    # TOUCH
+    print_step "5. Comando 'touch' - Crear archivos"
+    run_command_demo "touch archivo1.txt archivo2.txt archivo3.txt" \
+        "Crea archivos vacíos"
+    
+    run_command_demo "ls -lh" \
+        "Verificamos que los archivos fueron creados"
+    
+    # ECHO
+    print_step "6. Comando 'echo' - Imprimir texto"
+    run_command_demo "echo 'Hola desde Linux Tour'" \
+        "Imprime texto en la terminal"
+    
+    run_command_demo "echo 'Contenido del archivo' > archivo1.txt" \
+        "Redirige la salida a un archivo (sobrescribe)"
+    
+    run_command_demo "echo 'Más contenido' >> archivo1.txt" \
+        "Agrega contenido al final del archivo"
+    
+    # CAT
+    print_step "7. Comando 'cat' - Concatenate"
+    run_command_demo "cat archivo1.txt" \
+        "Muestra el contenido de un archivo"
+    
+    # CP
+    print_step "8. Comando 'cp' - Copy"
+    run_command_demo "cp archivo1.txt archivo1_backup.txt" \
+        "Copia un archivo"
+    
+    run_command_demo "ls -lh" \
+        "Verificamos que se creó la copia"
+    
+    # MV
+    print_step "9. Comando 'mv' - Move/Rename"
+    run_command_demo "mv archivo2.txt archivo2_renombrado.txt" \
+        "Renombra un archivo"
+    
+    run_command_demo "ls -lh" \
+        "Verificamos el cambio de nombre"
+    
+    # RM
+    print_step "10. Comando 'rm' - Remove"
+    run_command_demo "rm archivo3.txt" \
+        "Elimina un archivo"
+    
+    run_command_demo "ls -lh" \
+        "Verificamos que el archivo fue eliminado"
+    
+    # Limpieza
+    print_step "Limpiando archivos de demostración..."
+    cd /tmp
+    run_command_demo "rm -rf /tmp/linux-tour-demo" \
+        "Elimina el directorio de demostración y todo su contenido"
+    
+    print_success "${EMOJI_PARTY} ¡Lección completada!"
+    print_info "Has aprendido los 10 comandos más básicos de Linux"
+    echo ""
+}
+PLUGIN_EOF
+    
+    # Plugin 02: Navegación avanzada
+    cat > "$PLUGINS_DIR/02-navigation.sh" <<'PLUGIN_EOF'
+#!/bin/bash
+# Plugin: Navegación Avanzada
+# Descripción: Comandos avanzados para navegar el sistema de archivos
+
+plugin_info() {
+    echo "02-navigation"
+    echo "Navegación Avanzada"
+    echo "find, grep, which, whereis y más"
+}
+
+plugin_run() {
+    print_header "${EMOJI_MAGNIFY} LECCIÓN 2: NAVEGACIÓN AVANZADA"
+    
+    print_step "Aprende a buscar y encontrar archivos en Linux"
+    delay 3
+    
+    # WHICH
+    print_step "1. Comando 'which' - Ubicación de ejecutables"
+    run_command_demo "which bash" \
+        "Muestra la ruta del ejecutable bash"
+    
+    run_command_demo "which ls" \
+        "Muestra dónde está el comando ls"
+    
+    # WHEREIS
+    print_step "2. Comando 'whereis' - Ubicación completa"
+    run_command_demo "whereis bash" \
+        "Muestra binario, código fuente y páginas de manual"
+    
+    # FIND
+    print_step "3. Comando 'find' - Buscar archivos"
+    
+    # Crear estructura de prueba
+    mkdir -p /tmp/find-demo/dir1/dir2
+    touch /tmp/find-demo/test1.txt
+    touch /tmp/find-demo/test2.log
+    touch /tmp/find-demo/dir1/test3.txt
+    
+    run_command_demo "find /tmp/find-demo -name '*.txt'" \
+        "Busca todos los archivos .txt"
+    
+    run_command_demo "find /tmp/find-demo -type d" \
+        "Busca solo directorios"
+    
+    run_command_demo "find /tmp/find-demo -type f" \
+        "Busca solo archivos"
+    
+    # GREP
+    print_step "4. Comando 'grep' - Buscar texto"
+    echo "Linux es genial" > /tmp/find-demo/test1.txt
+    echo "Tour interactivo" >> /tmp/find-demo/test1.txt
+    echo "Aprendiendo comandos" > /tmp/find-demo/test2.log
+    
+    run_command_demo "grep 'Linux' /tmp/find-demo/test1.txt" \
+        "Busca la palabra 'Linux' en el archivo"
+    
+    run_command_demo "grep -r 'Linux' /tmp/find-demo" \
+        "Busca recursivamente en todos los archivos"
+    
+    run_command_demo "grep -i 'LINUX' /tmp/find-demo/test1.txt" \
+        "Búsqueda sin distinguir mayúsculas/minúsculas"
+    
+    # DU
+    print_step "5. Comando 'du' - Disk Usage"
+    run_command_demo "du -sh /tmp/find-demo" \
+        "Muestra el tamaño total del directorio"
+    
+    # TREE (si está disponible)
+    if command -v tree &> /dev/null; then
+        print_step "6. Comando 'tree' - Vista de árbol"
+        run_command_demo "tree /tmp/find-demo" \
+            "Muestra la estructura en forma de árbol"
+    fi
+    
+    # Limpieza
+    rm -rf /tmp/find-demo
+    
+    print_success "${EMOJI_PARTY} ¡Lección 2 completada!"
+    echo ""
+}
+PLUGIN_EOF
+    
+    # Plugin 03: Permisos y usuarios
+    cat > "$PLUGINS_DIR/03-permissions.sh" <<'PLUGIN_EOF'
+#!/bin/bash
+# Plugin: Permisos y Usuarios
+# Descripción: Aprende sobre permisos de archivos y gestión de usuarios
+
+plugin_info() {
+    echo "03-permissions"
+    echo "Permisos y Usuarios"
+    echo "chmod, chown, usuarios y grupos"
+}
+
+plugin_run() {
+    print_header "${EMOJI_GEAR} LECCIÓN 3: PERMISOS Y USUARIOS"
+    
+    print_step "Comprende el sistema de permisos de Linux"
+    delay 3
+    
+    # WHO
+    print_step "1. Comando 'whoami' - Usuario actual"
+    run_command_demo "whoami" \
+        "Muestra tu nombre de usuario actual"
+    
+    # ID
+    print_step "2. Comando 'id' - Información del usuario"
+    run_command_demo "id" \
+        "Muestra UID, GID y grupos del usuario"
+    
+    # Crear archivo de prueba
+    mkdir -p /tmp/perms-demo
+    cd /tmp/perms-demo
+    touch test-file.txt
+    
+    # LS -L
+    print_step "3. Ver permisos con 'ls -l'"
+    run_command_demo "ls -l test-file.txt" \
+        "La primera columna muestra los permisos (rwxrwxrwx)"
+    
+    print_info "Permisos: r=read(4), w=write(2), x=execute(1)"
+    print_info "Formato: [tipo][owner][group][others]"
+    delay 3
+    
+    # CHMOD
+    print_step "4. Comando 'chmod' - Cambiar permisos"
+    run_command_demo "chmod 644 test-file.txt" \
+        "Establece permisos: rw-r--r-- (owner: rw, group: r, others: r)"
+    
+    run_command_demo "ls -l test-file.txt" \
+        "Verificamos los nuevos permisos"
+    
+    run_command_demo "chmod +x test-file.txt" \
+        "Agrega permiso de ejecución"
+    
+    run_command_demo "ls -l test-file.txt" \
+        "Ahora tiene permiso de ejecución (x)"
+    
+    # UMASK
+    print_step "5. Comando 'umask' - Permisos por defecto"
+    run_command_demo "umask" \
+        "Muestra la máscara de permisos actual"
+    
+    # GROUPS
+    print_step "6. Comando 'groups' - Grupos del usuario"
+    run_command_demo "groups" \
+        "Muestra los grupos a los que perteneces"
+    
+    # Limpieza
+    cd /tmp
+    rm -rf /tmp/perms-demo
+    
+    print_success "${EMOJI_PARTY} ¡Lección 3 completada!"
+    print_info "Ahora comprendes el sistema de permisos de Linux"
+    echo ""
+}
+PLUGIN_EOF
+    
+    chmod +x "$PLUGINS_DIR"/*.sh
+}
+
+list_plugins() {
+    print_banner
+    print_header "${EMOJI_STAR} PLUGINS DISPONIBLES"
+    
+    if [ ! -d "$PLUGINS_DIR" ] || [ -z "$(ls -A "$PLUGINS_DIR" 2>/dev/null)" ]; then
+        print_error "No hay plugins instalados"
+        print_info "Ejecuta: linux-tour --install"
+        exit 1
+    fi
+    
+    local count=0
+    for plugin in "$PLUGINS_DIR"/*.sh; do
+        if [ -f "$plugin" ]; then
+            source "$plugin"
+            count=$((count + 1))
+            local info=($(plugin_info))
+            local plugin_id="${info[0]}"
+            local plugin_name="${info[1]} ${info[2]} ${info[3]} ${info[4]}"
+            local plugin_desc="${info[@]:5}"
+            
+            echo -e "${BOLD}${count}. ${plugin_name}${NC}"
+            echo -e "   ${CYAN}ID:${NC} ${plugin_id}"
+            echo -e "   ${CYAN}Descripción:${NC} ${plugin_desc}"
+            echo ""
+        fi
+    done
+    
+    print_info "Para ejecutar un plugin específico:"
+    echo "  ${BOLD}linux-tour run <número o ID>${NC}"
+    echo ""
+    print_info "Para ejecutar todos los plugins:"
+    echo "  ${BOLD}linux-tour run${NC}"
+    echo ""
+}
+
+run_plugin() {
+    local plugin_file="$1"
+    
+    if [ ! -f "$plugin_file" ]; then
+        print_error "Plugin no encontrado: $plugin_file"
+        exit 1
+    fi
+    
+    source "$plugin_file"
+    
+    # Exportar funciones para que el plugin las use
+    export -f print_header print_step print_success print_error print_info
+    export -f print_command print_output print_explanation
+    export -f run_command_demo delay
+    export EMOJI_ROCKET EMOJI_BOOK EMOJI_CHECK EMOJI_CROSS EMOJI_INFO
+    export EMOJI_WARN EMOJI_STAR EMOJI_COMPUTER EMOJI_FOLDER EMOJI_FILE
+    export EMOJI_TRASH EMOJI_MAGNIFY EMOJI_PARTY EMOJI_GEAR EMOJI_LIGHT
+    export RED GREEN YELLOW BLUE CYAN MAGENTA BOLD NC DELAY
+    
+    plugin_run
+}
+
+run_tour() {
+    local plugin_id="$1"
+    
+    if [ ! -d "$PLUGINS_DIR" ]; then
+        print_error "Linux Tour no está instalado"
+        print_info "Ejecuta: linux-tour --install"
+        exit 1
+    fi
+    
+    print_banner
+    
+    if [ -n "$plugin_id" ]; then
+        # Ejecutar plugin específico
+        if [[ "$plugin_id" =~ ^[0-9]+$ ]]; then
+            # Es un número
+            local plugin_file=$(ls "$PLUGINS_DIR"/*.sh | sed -n "${plugin_id}p")
+        else
+            # Es un ID
+            local plugin_file=$(ls "$PLUGINS_DIR"/*"$plugin_id"*.sh | head -n 1)
+        fi
+        
+        if [ -z "$plugin_file" ]; then
+            print_error "Plugin no encontrado: $plugin_id"
+            print_info "Usa 'linux-tour list' para ver plugins disponibles"
+            exit 1
+        fi
+        
+        run_plugin "$plugin_file"
+    else
+        # Ejecutar todos los plugins
+        print_header "${EMOJI_ROCKET} TOUR COMPLETO DE LINUX"
+        print_info "Ejecutando todos los plugins en orden..."
+        delay 2
+        
+        local count=0
+        for plugin in "$PLUGINS_DIR"/*.sh; do
+            if [ -f "$plugin" ]; then
+                count=$((count + 1))
+                run_plugin "$plugin"
+                
+                if [ $count -lt $(ls "$PLUGINS_DIR"/*.sh | wc -l) ]; then
+                    echo ""
+                    print_info "Presiona Enter para continuar al siguiente módulo..."
+                    read
+                fi
+            fi
+        done
+        
+        print_header "${EMOJI_PARTY} TOUR COMPLETADO"
+        print_success "¡Felicitaciones! Has completado el tour de Linux"
+        print_info "Has aprendido los comandos esenciales de Linux"
+        echo ""
+    fi
+}
+
+show_help() {
+    print_banner
+    cat <<EOF
+${BOLD}USO:${NC}
+  linux-tour [COMANDO] [OPCIONES]
+
+${BOLD}COMANDOS:${NC}
+  --install              Instala Linux Tour en el sistema
+  --uninstall            Desinstala Linux Tour del sistema
+  run [plugin]           Ejecuta el tour (o un plugin específico)
+  list                   Lista todos los plugins disponibles
+  --help                 Muestra esta ayuda
+
+${BOLD}EJEMPLOS:${NC}
+  linux-tour --install               # Instalar
+  linux-tour run                     # Ejecutar tour completo
+  linux-tour run 1                   # Ejecutar primer plugin
+  linux-tour run basic-commands      # Ejecutar plugin por ID
+  linux-tour list                    # Listar plugins
+  linux-tour --uninstall             # Desinstalar
+
+${BOLD}CREAR PLUGINS PERSONALIZADOS:${NC}
+  Los plugins se almacenan en: $PLUGINS_DIR
+  Formato: NN-nombre.sh (ej: 04-my-plugin.sh)
+  
+  Estructura de un plugin:
+    #!/bin/bash
+    plugin_info() {
+        echo "plugin-id"
+        echo "Nombre del Plugin"
+        echo "Descripción del plugin"
+    }
+    
+    plugin_run() {
+        print_header "MI PLUGIN"
+        run_command_demo "ls -la" "Descripción del comando"
+    }
+
+EOF
+}
+
+# Main
+case "${1:-}" in
+    --install)
+        install_tour
+        ;;
+    --uninstall)
+        uninstall_tour
+        ;;
+    run)
+        run_tour "$2"
+        ;;
+    list)
+        list_plugins
+        ;;
+    --help|help|-h)
+        show_help
+        ;;
+    *)
+        if [ -z "$1" ]; then
+            show_help
+        else
+            print_error "Comando no reconocido: $1"
+            show_help
+            exit 1
+        fi
+        ;;
+esac
+
