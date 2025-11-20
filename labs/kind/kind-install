@@ -1,0 +1,516 @@
+#!/bin/bash
+
+# lab-kind.sh - Script para instalar/desinstalar un clúster Kind con Apache
+# Uso: ./lab-kind.sh --install [--nodes N] | --uninstall
+
+set -e
+
+CLUSTER_NAME="lab-kind"
+WORK_DIR="/tmp/lab-kind"
+NUM_NODES=1  # Por defecto solo control-plane
+
+# Colores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+check_dependencies() {
+    print_info "Verificando dependencias..."
+    
+    # Verificar Docker
+    if ! command -v docker &> /dev/null; then
+        print_error "Docker no está instalado. Por favor instala Docker primero."
+        exit 1
+    fi
+    
+    # Verificar kubectl
+    if ! command -v kubectl &> /dev/null; then
+        print_warning "kubectl no está instalado. Instalando..."
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+    fi
+    
+    # Verificar kind
+    if ! command -v kind &> /dev/null; then
+        print_warning "kind no está instalado. Instalando..."
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+    fi
+    
+    print_info "Todas las dependencias están instaladas."
+}
+
+create_kind_config() {
+    print_info "Creando configuración de Kind..."
+    
+    mkdir -p "$WORK_DIR"
+    
+    # Crear configuración base
+    cat > "$WORK_DIR/kind-config.yaml" <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30080
+    hostPort: 30080
+    protocol: TCP
+  - containerPort: 80
+    hostPort: 8080
+    protocol: TCP
+EOF
+    
+    # Si NUM_NODES > 1, agregar workers
+    if [ "$NUM_NODES" -gt 1 ]; then
+        local num_workers=$((NUM_NODES - 1))
+        print_info "Configurando clúster con 1 control-plane y $num_workers worker(s)..."
+        
+        for ((i=1; i<=num_workers; i++)); do
+            cat >> "$WORK_DIR/kind-config.yaml" <<EOF
+- role: worker
+EOF
+        done
+    else
+        print_info "Configurando clúster con 1 control-plane (sin workers)..."
+    fi
+    
+    print_info "Configuración de Kind creada en $WORK_DIR/kind-config.yaml"
+}
+
+create_custom_html() {
+    print_info "Creando página HTML personalizada..."
+    
+    cat > "$WORK_DIR/index.html" <<'EOF'
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hola desde Apache</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Arial', sans-serif;
+        }
+        .container {
+            text-align: center;
+            color: white;
+            padding: 40px;
+            border-radius: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+        h1 {
+            font-size: 3em;
+            margin: 0;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        p {
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+        .info {
+            margin-top: 30px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hola desde Apache</h1>
+        <p>Corriendo en Kubernetes Kind</p>
+        <div class="info">
+            <p>Clúster multi-nodo</p>
+        </div>
+    </div>
+</body>
+</html>
+EOF
+    
+    print_info "Página HTML personalizada creada."
+}
+
+create_kubernetes_resources() {
+    print_info "Creando recursos de Kubernetes..."
+    
+    # ConfigMap con el HTML personalizado
+    cat > "$WORK_DIR/configmap.yaml" <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apache-html
+  namespace: default
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Hola desde Apache</title>
+        <style>
+            body {
+                margin: 0;
+                padding: 0;
+                height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                font-family: 'Arial', sans-serif;
+            }
+            .container {
+                text-align: center;
+                color: white;
+                padding: 40px;
+                border-radius: 15px;
+                background: rgba(255, 255, 255, 0.1);
+                box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+                backdrop-filter: blur(4px);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+            }
+            h1 {
+                font-size: 3em;
+                margin: 0;
+                text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+            }
+            p {
+                font-size: 1.2em;
+                margin-top: 20px;
+            }
+            .info {
+                margin-top: 30px;
+                font-size: 0.9em;
+                opacity: 0.8;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Hola desde Apache</h1>
+            <p>Corriendo en Kubernetes Kind</p>
+            <div class="info">
+                <p>Clúster multi-nodo</p>
+            </div>
+        </div>
+    </body>
+    </html>
+EOF
+    
+    # Deployment de Apache
+    cat > "$WORK_DIR/deployment.yaml" <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apache-deployment
+  namespace: default
+  labels:
+    app: apache
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: apache
+  template:
+    metadata:
+      labels:
+        app: apache
+    spec:
+      containers:
+      - name: apache
+        image: httpd:2.4
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-volume
+          mountPath: /usr/local/apache2/htdocs/
+      volumes:
+      - name: html-volume
+        configMap:
+          name: apache-html
+EOF
+    
+    # Service NodePort
+    cat > "$WORK_DIR/service-nodeport.yaml" <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: apache-nodeport
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: apache
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+EOF
+    
+    # Service LoadBalancer
+    cat > "$WORK_DIR/service-loadbalancer.yaml" <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: apache-loadbalancer
+  namespace: default
+spec:
+  type: LoadBalancer
+  selector:
+    app: apache
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+EOF
+    
+    print_info "Recursos de Kubernetes creados."
+}
+
+install_metallb() {
+    print_info "Instalando MetalLB para soporte de LoadBalancer..."
+    
+    # Instalar MetalLB
+    kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml
+    
+    # Esperar a que MetalLB esté listo
+    print_info "Esperando a que MetalLB esté listo..."
+    kubectl wait --namespace metallb-system \
+                --for=condition=ready pod \
+                --selector=app=metallb \
+                --timeout=120s
+    
+    # Obtener el rango de IP del clúster Docker
+    DOCKER_NETWORK=$(docker network inspect -f '{{.IPAM.Config}}' kind | grep -oP '\d+\.\d+\.\d+\.\d+/\d+' | head -n 1)
+    SUBNET=$(echo $DOCKER_NETWORK | cut -d'/' -f1 | cut -d'.' -f1-3)
+    
+    # Crear IPAddressPool
+    cat > "$WORK_DIR/metallb-pool.yaml" <<EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - ${SUBNET}.200-${SUBNET}.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - default-pool
+EOF
+    
+    kubectl apply -f "$WORK_DIR/metallb-pool.yaml"
+    
+    print_info "MetalLB instalado y configurado."
+}
+
+install() {
+    print_info "=== Iniciando instalación de lab-kind ==="
+    
+    check_dependencies
+    create_kind_config
+    create_custom_html
+    
+    # Crear clúster Kind
+    print_info "Creando clúster Kind '$CLUSTER_NAME'..."
+    kind create cluster --name "$CLUSTER_NAME" --config "$WORK_DIR/kind-config.yaml"
+    
+    # Esperar a que el clúster esté listo
+    print_info "Esperando a que el clúster esté listo..."
+    kubectl wait --for=condition=Ready nodes --all --timeout=180s
+    
+    # Mostrar información de los nodos
+    print_info "Nodos del clúster:"
+    kubectl get nodes
+    
+    # Crear recursos de Kubernetes
+    create_kubernetes_resources
+    
+    # Aplicar ConfigMap
+    print_info "Aplicando ConfigMap..."
+    kubectl apply -f "$WORK_DIR/configmap.yaml"
+    
+    # Aplicar Deployment
+    print_info "Desplegando Apache..."
+    kubectl apply -f "$WORK_DIR/deployment.yaml"
+    
+    # Esperar a que el deployment esté listo
+    print_info "Esperando a que Apache esté listo..."
+    kubectl wait --for=condition=Available deployment/apache-deployment --timeout=120s
+    
+    # Aplicar Service NodePort
+    print_info "Creando servicio NodePort..."
+    kubectl apply -f "$WORK_DIR/service-nodeport.yaml"
+    
+    # Instalar MetalLB
+    install_metallb
+    
+    # Aplicar Service LoadBalancer
+    print_info "Creando servicio LoadBalancer..."
+    kubectl apply -f "$WORK_DIR/service-loadbalancer.yaml"
+    
+    # Esperar a que el LoadBalancer obtenga una IP
+    print_info "Esperando a que el LoadBalancer obtenga una IP externa..."
+    sleep 10
+    
+    # Mostrar distribución de pods
+    print_info ""
+    print_info "Distribución de pods en los nodos:"
+    kubectl get pods -o wide
+    
+    print_info ""
+    print_info "=== Instalación completada ==="
+    print_info ""
+    print_info "Clúster: $CLUSTER_NAME"
+    print_info "Namespace: default"
+    print_info "Nodos: $NUM_NODES (1 control-plane + $((NUM_NODES - 1)) worker(s))"
+    print_info ""
+    print_info "Acceso NodePort: http://localhost:30080"
+    print_info ""
+    
+    LB_IP=$(kubectl get svc apache-loadbalancer -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "Pendiente")
+    print_info "Acceso LoadBalancer: http://${LB_IP}"
+    print_info ""
+    print_info "Comandos útiles:"
+    print_info "  - Ver pods: kubectl get pods -o wide"
+    print_info "  - Ver nodos: kubectl get nodes"
+    print_info "  - Ver servicios: kubectl get svc"
+    print_info "  - Ver logs: kubectl logs -l app=apache"
+    print_info ""
+}
+
+uninstall() {
+    print_info "=== Iniciando desinstalación de lab-kind ==="
+    
+    # Verificar si el clúster existe
+    if kind get clusters | grep -q "^${CLUSTER_NAME}$"; then
+        print_info "Eliminando clúster Kind '$CLUSTER_NAME'..."
+        kind delete cluster --name "$CLUSTER_NAME"
+        print_info "Clúster eliminado."
+    else
+        print_warning "El clúster '$CLUSTER_NAME' no existe."
+    fi
+    
+    # Limpiar directorio de trabajo
+    if [ -d "$WORK_DIR" ]; then
+        print_info "Limpiando archivos temporales..."
+        rm -rf "$WORK_DIR"
+        print_info "Archivos temporales eliminados."
+    fi
+    
+    print_info "=== Desinstalación completada ==="
+}
+
+show_help() {
+    cat <<EOF
+Uso: $0 [OPCIÓN]
+
+Script para instalar/desinstalar un clúster Kind con Apache
+
+Opciones:
+  --install           Instala el clúster Kind con Apache
+  --nodes N           Especifica el número total de nodos (1 control-plane + N-1 workers)
+                      Por defecto: 1 (solo control-plane)
+  --uninstall         Desinstala el clúster Kind y limpia recursos
+  --help              Muestra esta ayuda
+
+Ejemplos:
+  $0 --install                    # Instala clúster con 1 nodo (solo control-plane)
+  $0 --install --nodes 3          # Instala clúster con 3 nodos (1 control-plane + 2 workers)
+  $0 --install --nodes 5          # Instala clúster con 5 nodos (1 control-plane + 4 workers)
+  $0 --uninstall                  # Desinstala el clúster
+
+Después de la instalación:
+  - NodePort estará disponible en: http://localhost:30080
+  - LoadBalancer obtendrá una IP del rango MetalLB
+  - La página mostrará "Hola desde Apache" con fondo azul degradado
+  - Los pods se distribuirán entre los nodos workers disponibles
+
+EOF
+}
+
+# Main - Parsear argumentos
+INSTALL_MODE=false
+UNINSTALL_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --install)
+            INSTALL_MODE=true
+            shift
+            ;;
+        --nodes)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                NUM_NODES="$2"
+                if [ "$NUM_NODES" -lt 1 ]; then
+                    print_error "El número de nodos debe ser al menos 1"
+                    exit 1
+                fi
+                shift 2
+            else
+                print_error "El argumento --nodes requiere un número válido"
+                exit 1
+            fi
+            ;;
+        --uninstall)
+            UNINSTALL_MODE=true
+            shift
+            ;;
+        --help)
+            show_help
+            exit 0
+            ;;
+        *)
+            print_error "Opción no reconocida: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Ejecutar según el modo seleccionado
+if [ "$INSTALL_MODE" = true ] && [ "$UNINSTALL_MODE" = true ]; then
+    print_error "No se pueden usar --install y --uninstall al mismo tiempo"
+    show_help
+    exit 1
+elif [ "$INSTALL_MODE" = true ]; then
+    install
+elif [ "$UNINSTALL_MODE" = true ]; then
+    uninstall
+else
+    print_error "Debe especificar --install o --uninstall"
+    show_help
+    exit 1
+fi
+

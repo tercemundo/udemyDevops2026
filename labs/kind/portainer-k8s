@@ -1,0 +1,381 @@
+#!/bin/bash
+
+# portainer-k8s.sh - Script para instalar/desinstalar Portainer en Kubernetes
+# Uso: ./portainer-k8s.sh --install | --uninstall
+
+set -e
+
+NAMESPACE="portainer"
+WORK_DIR="/tmp/portainer-k8s"
+NODEPORT_HTTP=30090
+NODEPORT_HTTPS=30091
+
+# Colores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_success() {
+    echo -e "${BLUE}[SUCCESS]${NC} $1"
+}
+
+check_dependencies() {
+    print_info "Verificando dependencias..."
+    
+    # Verificar kubectl
+    if ! command -v kubectl &> /dev/null; then
+        print_error "kubectl no está instalado. Por favor instala kubectl primero."
+        exit 1
+    fi
+    
+    # Verificar que hay un clúster activo
+    if ! kubectl cluster-info &> /dev/null; then
+        print_error "No hay un clúster de Kubernetes activo. Por favor inicia tu clúster primero."
+        exit 1
+    fi
+    
+    print_info "Todas las dependencias están correctas."
+}
+
+create_portainer_resources() {
+    print_info "Creando recursos de Portainer..."
+    
+    mkdir -p "$WORK_DIR"
+    
+    # Crear archivo YAML completo para Portainer
+    cat > "$WORK_DIR/portainer-deployment.yaml" <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portainer
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portainer-sa-clusteradmin
+  namespace: portainer
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portainer-crb-clusteradmin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: portainer-sa-clusteradmin
+  namespace: portainer
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: portainer-data
+  namespace: portainer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portainer
+  namespace: portainer
+  labels:
+    app: portainer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portainer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: portainer
+    spec:
+      serviceAccountName: portainer-sa-clusteradmin
+      containers:
+      - name: portainer
+        image: portainer/portainer-ce:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9000
+          protocol: TCP
+          name: http
+        - containerPort: 9443
+          protocol: TCP
+          name: https
+        - containerPort: 8000
+          protocol: TCP
+          name: edge
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        env:
+        - name: PORTAINER_TUNNEL_PORT
+          value: "8000"
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: portainer-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portainer
+  namespace: portainer
+  labels:
+    app: portainer
+spec:
+  type: NodePort
+  selector:
+    app: portainer
+  ports:
+  - port: 9000
+    targetPort: 9000
+    nodePort: ${NODEPORT_HTTP}
+    protocol: TCP
+    name: http
+  - port: 9443
+    targetPort: 9443
+    nodePort: ${NODEPORT_HTTPS}
+    protocol: TCP
+    name: https
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30092
+    protocol: TCP
+    name: edge
+EOF
+    
+    print_info "Recursos de Portainer creados en $WORK_DIR/portainer-deployment.yaml"
+}
+
+install() {
+    print_info "=== Iniciando instalación de Portainer ==="
+    echo ""
+    
+    check_dependencies
+    create_portainer_resources
+    
+    # Verificar si ya existe el namespace
+    if kubectl get namespace "$NAMESPACE" &> /dev/null; then
+        print_warning "El namespace '$NAMESPACE' ya existe. Verificando recursos..."
+        if kubectl get deployment portainer -n "$NAMESPACE" &> /dev/null; then
+            print_error "Portainer ya está instalado. Usa --uninstall primero para reinstalar."
+            exit 1
+        fi
+    fi
+    
+    # Aplicar manifiestos
+    print_info "Aplicando manifiestos de Portainer..."
+    kubectl apply -f "$WORK_DIR/portainer-deployment.yaml"
+    
+    # Esperar a que el namespace esté creado
+    print_info "Esperando a que el namespace esté listo..."
+    sleep 2
+    
+    # Esperar a que el PVC esté bound
+    print_info "Esperando a que el PersistentVolumeClaim esté bound..."
+    kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/portainer-data -n "$NAMESPACE" --timeout=120s || print_warning "PVC aún no está bound, continuando..."
+    
+    # Esperar a que el deployment esté listo
+    print_info "Esperando a que Portainer esté listo (esto puede tomar unos minutos)..."
+    kubectl wait --for=condition=Available deployment/portainer -n "$NAMESPACE" --timeout=300s
+    
+    # Verificar el estado del pod
+    print_info "Verificando estado del pod..."
+    kubectl get pods -n "$NAMESPACE"
+    
+    echo ""
+    print_success "=== Instalación de Portainer completada ==="
+    echo ""
+    print_info "Namespace: $NAMESPACE"
+    print_info "Deployment: portainer"
+    print_info "Service Type: NodePort"
+    echo ""
+    print_success "Acceso a Portainer:"
+    print_info "  - HTTP:  http://localhost:${NODEPORT_HTTP}"
+    print_info "  - HTTPS: https://localhost:${NODEPORT_HTTPS}"
+    print_info "  - Edge:  http://localhost:30092"
+    echo ""
+    print_warning "IMPORTANTE:"
+    print_info "  1. En el primer acceso deberás crear un usuario administrador"
+    print_info "  2. Tienes 5 minutos para crear el usuario después del primer inicio"
+    print_info "  3. Se recomienda usar HTTPS (puerto ${NODEPORT_HTTPS})"
+    echo ""
+    print_info "Comandos útiles:"
+    print_info "  - Ver pods:     kubectl get pods -n $NAMESPACE"
+    print_info "  - Ver logs:     kubectl logs -n $NAMESPACE -l app=portainer"
+    print_info "  - Ver servicio: kubectl get svc -n $NAMESPACE"
+    print_info "  - Ver PVC:      kubectl get pvc -n $NAMESPACE"
+    echo ""
+    
+    # Obtener la IP del nodo para acceso remoto
+    NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+    if [ -n "$NODE_IP" ]; then
+        print_info "Para acceso remoto:"
+        print_info "  - HTTP:  http://${NODE_IP}:${NODEPORT_HTTP}"
+        print_info "  - HTTPS: https://${NODE_IP}:${NODEPORT_HTTPS}"
+        echo ""
+    fi
+}
+
+uninstall() {
+    print_info "=== Iniciando desinstalación de Portainer ==="
+    echo ""
+    
+    # Verificar si kubectl está disponible
+    if ! command -v kubectl &> /dev/null; then
+        print_error "kubectl no está instalado."
+        exit 1
+    fi
+    
+    # Verificar si el namespace existe
+    if ! kubectl get namespace "$NAMESPACE" &> /dev/null; then
+        print_warning "El namespace '$NAMESPACE' no existe. No hay nada que desinstalar."
+        exit 0
+    fi
+    
+    # Eliminar deployment
+    print_info "Eliminando deployment de Portainer..."
+    if kubectl get deployment portainer -n "$NAMESPACE" &> /dev/null; then
+        kubectl delete deployment portainer -n "$NAMESPACE"
+        print_info "Deployment eliminado."
+    fi
+    
+    # Eliminar service
+    print_info "Eliminando servicios..."
+    if kubectl get service portainer -n "$NAMESPACE" &> /dev/null; then
+        kubectl delete service portainer -n "$NAMESPACE"
+        print_info "Servicio eliminado."
+    fi
+    
+    # Eliminar PVC
+    print_info "Eliminando PersistentVolumeClaim..."
+    if kubectl get pvc portainer-data -n "$NAMESPACE" &> /dev/null; then
+        kubectl delete pvc portainer-data -n "$NAMESPACE"
+        print_info "PVC eliminado."
+    fi
+    
+    # Eliminar ClusterRoleBinding
+    print_info "Eliminando ClusterRoleBinding..."
+    if kubectl get clusterrolebinding portainer-crb-clusteradmin &> /dev/null; then
+        kubectl delete clusterrolebinding portainer-crb-clusteradmin
+        print_info "ClusterRoleBinding eliminado."
+    fi
+    
+    # Eliminar ServiceAccount
+    print_info "Eliminando ServiceAccount..."
+    if kubectl get serviceaccount portainer-sa-clusteradmin -n "$NAMESPACE" &> /dev/null; then
+        kubectl delete serviceaccount portainer-sa-clusteradmin -n "$NAMESPACE"
+        print_info "ServiceAccount eliminado."
+    fi
+    
+    # Eliminar namespace
+    print_info "Eliminando namespace '$NAMESPACE'..."
+    kubectl delete namespace "$NAMESPACE"
+    print_info "Namespace eliminado."
+    
+    # Limpiar archivos temporales
+    if [ -d "$WORK_DIR" ]; then
+        print_info "Limpiando archivos temporales..."
+        rm -rf "$WORK_DIR"
+        print_info "Archivos temporales eliminados."
+    fi
+    
+    echo ""
+    print_success "=== Desinstalación de Portainer completada ==="
+    echo ""
+}
+
+show_help() {
+    cat <<EOF
+Uso: $0 [OPCIÓN]
+
+Script para instalar/desinstalar Portainer CE en Kubernetes
+
+Opciones:
+  --install       Instala Portainer en el clúster de Kubernetes
+  --uninstall     Desinstala Portainer y limpia todos los recursos
+  --help          Muestra esta ayuda
+
+Descripción:
+  Portainer es una plataforma de gestión ligera que te permite administrar
+  fácilmente tus entornos Docker, Kubernetes, y más a través de una interfaz
+  web intuitiva.
+
+Requisitos:
+  - kubectl instalado y configurado
+  - Un clúster de Kubernetes activo (Kind, Minikube, k3s, etc.)
+  - Permisos suficientes para crear recursos en el clúster
+
+Puertos utilizados:
+  - HTTP:  ${NODEPORT_HTTP} (NodePort)
+  - HTTPS: ${NODEPORT_HTTPS} (NodePort)
+  - Edge:  30092 (NodePort)
+
+Ejemplos:
+  $0 --install      # Instala Portainer en el clúster
+  $0 --uninstall    # Desinstala Portainer completamente
+
+Después de la instalación:
+  1. Accede a Portainer en http://localhost:${NODEPORT_HTTP} o https://localhost:${NODEPORT_HTTPS}
+  2. Crea tu usuario administrador en los primeros 5 minutos
+  3. Selecciona el entorno Kubernetes para comenzar a gestionar tu clúster
+
+EOF
+}
+
+# Main
+if [ $# -eq 0 ]; then
+    print_error "No se especificó ninguna opción."
+    echo ""
+    show_help
+    exit 1
+fi
+
+case "$1" in
+    --install)
+        install
+        ;;
+    --uninstall)
+        uninstall
+        ;;
+    --help)
+        show_help
+        ;;
+    *)
+        print_error "Opción no reconocida: $1"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac
+

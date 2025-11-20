@@ -1,0 +1,326 @@
+#!/bin/bash
+
+# fix-portainer-access.sh - Diagnóstico detallado y solución para acceso a Portainer
+# Uso: ./fix-portainer-access.sh
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+print_section() {
+    echo ""
+    echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${BLUE}║ $1${NC}"
+    echo -e "${BOLD}${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}✗ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠ $1${NC}"
+}
+
+print_info() {
+    echo -e "${CYAN}ℹ $1${NC}"
+}
+
+CLUSTER_NAME=$(kubectl config current-context | sed 's/kind-//' 2>/dev/null || echo "lab-kind")
+NAMESPACE="portainer"
+
+echo -e "${BOLD}${CYAN}"
+cat << "EOF"
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║     PORTAINER ACCESS DIAGNOSTIC & FIX TOOL                   ║
+║     Para clústeres Kind con problemas de NodePort            ║
+║                                                               ║
+╔═══════════════════════════════════════════════════════════════╝
+EOF
+echo -e "${NC}"
+
+# ============================================================================
+print_section "FASE 1: DIAGNÓSTICO INTERNO DEL CLÚSTER"
+# ============================================================================
+
+echo -e "\n${BOLD}1.1 Estado del Pod de Portainer${NC}"
+POD_STATUS=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "NotFound")
+POD_NAME=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+POD_IP=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo "")
+READY=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+
+if [ "$POD_STATUS" = "Running" ] && [ "$READY" = "true" ]; then
+    print_success "Pod está Running y Ready"
+    echo "   - Nombre: $POD_NAME"
+    echo "   - IP: $POD_IP"
+else
+    print_error "Pod NO está listo (Status: $POD_STATUS, Ready: $READY)"
+    exit 1
+fi
+
+echo -e "\n${BOLD}1.2 Endpoints del Servicio${NC}"
+ENDPOINT_IP=$(kubectl get endpoints portainer -n "$NAMESPACE" -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || echo "")
+ENDPOINT_PORT=$(kubectl get endpoints portainer -n "$NAMESPACE" -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null || echo "")
+
+if [ -n "$ENDPOINT_IP" ]; then
+    print_success "Service tiene endpoints válidos: $ENDPOINT_IP:$ENDPOINT_PORT"
+else
+    print_error "Service NO tiene endpoints"
+    exit 1
+fi
+
+echo -e "\n${BOLD}1.3 Configuración del NodePort${NC}"
+NODEPORT_HTTP=$(kubectl get svc portainer -n "$NAMESPACE" -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}' 2>/dev/null || echo "")
+NODEPORT_HTTPS=$(kubectl get svc portainer -n "$NAMESPACE" -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}' 2>/dev/null || echo "")
+
+echo "   - HTTP NodePort: $NODEPORT_HTTP"
+echo "   - HTTPS NodePort: $NODEPORT_HTTPS"
+
+echo -e "\n${BOLD}1.4 Test de conectividad INTERNA (dentro del clúster)${NC}"
+print_info "Probando acceso directo al Pod IP..."
+TEST_INTERNAL=$(kubectl run test-pod-ip --image=curlimages/curl:latest --rm -i --restart=Never --command -- \
+    curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "http://${POD_IP}:9000" 2>/dev/null || echo "000")
+
+if [ "$TEST_INTERNAL" = "307" ] || [ "$TEST_INTERNAL" = "200" ]; then
+    print_success "Portainer responde internamente (HTTP $TEST_INTERNAL)"
+else
+    print_error "Portainer NO responde internamente (HTTP $TEST_INTERNAL)"
+fi
+
+# ============================================================================
+print_section "FASE 2: DIAGNÓSTICO DE CONECTIVIDAD EXTERNA"
+# ============================================================================
+
+echo -e "\n${BOLD}2.1 Identificando contenedor Docker de Kind${NC}"
+CONTROL_PLANE=$(docker ps --filter "name=${CLUSTER_NAME}-control-plane" --format "{{.Names}}" 2>/dev/null | head -n 1)
+
+if [ -z "$CONTROL_PLANE" ]; then
+    print_error "No se encontró el contenedor control-plane de Kind"
+    echo "   Clústeres Kind disponibles:"
+    docker ps --filter "label=io.x-k8s.kind.cluster" --format "   - {{.Names}}"
+    exit 1
+fi
+
+print_success "Control-plane encontrado: $CONTROL_PLANE"
+
+echo -e "\n${BOLD}2.2 Verificando Port Mappings en Docker${NC}"
+print_info "Puertos mapeados en el contenedor Kind:"
+docker port "$CONTROL_PLANE" | sed 's/^/   /'
+
+echo ""
+PORT_30090_MAPPED=$(docker port "$CONTROL_PLANE" | grep -E "30090" || echo "")
+PORT_30091_MAPPED=$(docker port "$CONTROL_PLANE" | grep -E "30091" || echo "")
+
+if [ -n "$PORT_30090_MAPPED" ]; then
+    print_success "Puerto 30090 está mapeado"
+    echo "   $PORT_30090_MAPPED"
+else
+    print_error "Puerto 30090 NO está mapeado en Docker"
+fi
+
+if [ -n "$PORT_30091_MAPPED" ]; then
+    print_success "Puerto 30091 está mapeado"
+    echo "   $PORT_30091_MAPPED"
+else
+    print_error "Puerto 30091 NO está mapeado en Docker"
+fi
+
+echo -e "\n${BOLD}2.3 Test de conectividad EXTERNA (desde tu host)${NC}"
+print_info "Intentando conectar a 192.168.1.45:$NODEPORT_HTTP..."
+
+if timeout 3 bash -c "echo > /dev/tcp/192.168.1.45/$NODEPORT_HTTP" 2>/dev/null; then
+    print_success "Puerto $NODEPORT_HTTP es accesible externamente"
+else
+    print_error "Puerto $NODEPORT_HTTP NO es accesible externamente (Connection refused)"
+fi
+
+# ============================================================================
+print_section "FASE 3: IDENTIFICACIÓN DEL PROBLEMA"
+# ============================================================================
+
+echo ""
+if [ -z "$PORT_30090_MAPPED" ] && [ -z "$PORT_30091_MAPPED" ]; then
+    print_error "PROBLEMA IDENTIFICADO:"
+    echo ""
+    echo "   El clúster Kind NO tiene los puertos de Portainer mapeados"
+    echo "   en la configuración de extraPortMappings."
+    echo ""
+    print_info "EXPLICACIÓN:"
+    echo "   - Portainer funciona DENTRO del clúster ✓"
+    echo "   - El Service NodePort está configurado correctamente ✓"
+    echo "   - Pero Kind NO expone los puertos 30090/30091 al host ✗"
+    echo ""
+    print_warning "Kind corre en contenedores Docker. Para acceder a NodePorts"
+    print_warning "desde tu máquina (192.168.1.45), necesitas extraPortMappings."
+elif [ "$TEST_INTERNAL" != "307" ] && [ "$TEST_INTERNAL" != "200" ]; then
+    print_error "PROBLEMA IDENTIFICADO:"
+    echo ""
+    echo "   Portainer NO está respondiendo dentro del clúster"
+    print_info "Revisa los logs: kubectl logs -n $NAMESPACE $POD_NAME"
+else
+    print_success "Configuración correcta detectada"
+fi
+
+# ============================================================================
+print_section "FASE 4: SOLUCIONES DISPONIBLES"
+# ============================================================================
+
+echo ""
+echo -e "${BOLD}Tienes 3 opciones para acceder a Portainer:${NC}"
+echo ""
+
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${BOLD}OPCIÓN 1: Port-Forward (RECOMENDADO - Funciona AHORA)${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+echo ""
+print_info "Esta es la solución más rápida y NO requiere recrear el clúster"
+echo ""
+echo "Ejecuta en una terminal:"
+echo ""
+echo -e "${CYAN}  kubectl port-forward -n portainer svc/portainer 9000:9000 9443:9443${NC}"
+echo ""
+echo "Luego accede a:"
+echo "  • http://localhost:9000"
+echo "  • https://localhost:9443"
+echo ""
+print_success "Ventajas: Inmediato, seguro, funciona siempre"
+print_warning "Desventaja: Requiere mantener la terminal abierta"
+echo ""
+
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${BOLD}OPCIÓN 2: Recrear Clúster con extraPortMappings (PERMANENTE)${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+echo ""
+print_info "Modifica lab-kind.sh para incluir puertos de Portainer"
+echo ""
+
+cat > /tmp/fix-kind-config.yaml <<'EOF'
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30080
+    hostPort: 30080
+    protocol: TCP
+  - containerPort: 30090
+    hostPort: 30090
+    protocol: TCP
+  - containerPort: 30091
+    hostPort: 30091
+    protocol: TCP
+EOF
+
+echo "Archivo de configuración guardado en: /tmp/fix-kind-config.yaml"
+echo ""
+echo "Pasos para aplicar:"
+echo ""
+echo "  1. Desinstalar el clúster actual:"
+echo -e "${CYAN}     ./lab-kind.sh --uninstall${NC}"
+echo ""
+echo "  2. Modificar lab-kind.sh en la función create_kind_config():"
+echo "     Agregar los puertos 30090 y 30091 a extraPortMappings"
+echo ""
+echo "  3. Recrear el clúster:"
+echo -e "${CYAN}     ./lab-kind.sh --install --nodes 3${NC}"
+echo ""
+echo "  4. Reinstalar Portainer:"
+echo -e "${CYAN}     ./portainer-k8s.sh --install${NC}"
+echo ""
+print_success "Ventaja: Acceso directo a http://192.168.1.45:30090"
+print_warning "Desventaja: Requiere eliminar y recrear el clúster"
+echo ""
+
+echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${BOLD}OPCIÓN 3: Acceso vía IP del Contenedor Docker (TEMPORAL)${NC}"
+echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+echo ""
+
+if [ -n "$CONTROL_PLANE" ]; then
+    DOCKER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CONTROL_PLANE" 2>/dev/null)
+    if [ -n "$DOCKER_IP" ] && [ -n "$NODEPORT_HTTP" ]; then
+        print_info "Puedes acceder usando la IP interna del contenedor Docker"
+        echo ""
+        echo "  • http://${DOCKER_IP}:${NODEPORT_HTTP}"
+        echo "  • https://${DOCKER_IP}:${NODEPORT_HTTPS}"
+        echo ""
+        print_warning "Esta IP solo funciona desde tu máquina (no desde red local)"
+    fi
+fi
+echo ""
+
+# ============================================================================
+print_section "FASE 5: APLICAR SOLUCIÓN AUTOMÁTICA"
+# ============================================================================
+
+echo ""
+echo "¿Deseas aplicar alguna solución ahora?"
+echo ""
+echo "  1) Port-forward (temporal, funciona inmediatamente)"
+echo "  2) Ver comando para recrear clúster (permanente)"
+echo "  3) Salir"
+echo ""
+read -p "Selecciona una opción [1-3]: " choice
+
+case $choice in
+    1)
+        echo ""
+        print_info "Iniciando port-forward..."
+        echo ""
+        print_success "Port-forward activo. Accede a http://localhost:9000"
+        print_warning "Presiona Ctrl+C para detener"
+        echo ""
+        kubectl port-forward -n portainer svc/portainer 9000:9000 9443:9443
+        ;;
+    2)
+        echo ""
+        print_info "Para recrear el clúster con soporte de Portainer:"
+        echo ""
+        echo -e "${CYAN}# 1. Backup de cualquier dato importante${NC}"
+        echo ""
+        echo -e "${CYAN}# 2. Desinstalar clúster actual${NC}"
+        echo "   ./lab-kind.sh --uninstall"
+        echo ""
+        echo -e "${CYAN}# 3. Editar lab-kind.sh, función create_kind_config()${NC}"
+        echo "   Agregar estas líneas a extraPortMappings:"
+        echo ""
+        cat <<'EOF'
+  - containerPort: 30090
+    hostPort: 30090
+    protocol: TCP
+  - containerPort: 30091
+    hostPort: 30091
+    protocol: TCP
+EOF
+        echo ""
+        echo -e "${CYAN}# 4. Recrear clúster${NC}"
+        echo "   ./lab-kind.sh --install --nodes 3"
+        echo ""
+        echo -e "${CYAN}# 5. Reinstalar Portainer${NC}"
+        echo "   ./portainer-k8s.sh --install"
+        echo ""
+        ;;
+    3)
+        echo ""
+        print_info "Saliendo sin cambios"
+        ;;
+    *)
+        print_error "Opción inválida"
+        ;;
+esac
+
+echo ""
+print_section "FIN DEL DIAGNÓSTICO"
+echo ""
+
